@@ -288,13 +288,30 @@ def gmail_list_filters() -> str:
     return json.dumps(filters, indent=2) if filters else "No filters found."
 
 
+_ALLOWED_FILTER_ACTION_KEYS = {"addLabelIds", "removeLabelIds"}
+
+
 def gmail_create_filter(criteria: dict, action: dict) -> str:
     """Create a Gmail filter.
 
     Args:
         criteria: Filter criteria dict. Keys: from, to, subject, query, negatedQuery, hasAttachment, excludeChats, size, sizeComparison.
-        action: Filter action dict. Keys: addLabelIds, removeLabelIds, forward, archive (removeLabelIds=['INBOX']), markRead (removeLabelIds=['UNREAD']), star (addLabelIds=['STARRED']).
+        action: Filter action dict. ONLY addLabelIds and removeLabelIds are
+                permitted. forward and vacation are explicitly rejected to
+                prevent silent auto-forward / out-of-office exfiltration paths.
+                archive = removeLabelIds=['INBOX']; markRead = removeLabelIds=['UNREAD'];
+                star = addLabelIds=['STARRED'].
     """
+    # Action allowlist — reject anything that could forward mail off-account
+    # or trigger an auto-responder before any API call is made.
+    disallowed = set(action or {}) - _ALLOWED_FILTER_ACTION_KEYS
+    if disallowed:
+        key = sorted(disallowed)[0]
+        raise ValueError(
+            f"action.{key} is not permitted by this MCP server; "
+            "only addLabelIds/removeLabelIds allowed"
+        )
+
     svc = _gmail()
     body = {"criteria": criteria, "action": action}
     result = svc.users().settings().filters().create(userId="me", body=body).execute()

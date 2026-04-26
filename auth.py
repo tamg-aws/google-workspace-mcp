@@ -14,14 +14,25 @@ from google.auth.transport.requests import Request
 from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.discovery import build
 
-# Where tokens get stored
-TOKEN_DIR = Path.home() / ".gw-mcp"
+# Where tokens get stored. GW_MCP_TOKEN_DIR overrides the default so each
+# account can have its own isolated token file when multiple MCP server
+# processes run in parallel.
+TOKEN_DIR = Path(os.environ.get("GW_MCP_TOKEN_DIR") or (Path.home() / ".gw-mcp"))
 TOKEN_FILE = TOKEN_DIR / "token.json"
 CREDS_FILE = TOKEN_DIR / "credentials.json"
 
-# Scopes — read from the existing token file if available, otherwise use defaults.
-# This avoids scope mismatch errors when refreshing tokens that were issued with
-# narrower scopes (e.g. readonly) than the full set below.
+# Scopes are read from the existing token file if present so refresh does not
+# fail with scope mismatch. For NEW authorizations, the default is read-only
+# to minimize blast radius; set GW_MCP_SCOPES=full in the environment to
+# opt into the broader read/write scope set.
+# Least-privilege default: Gmail read-only. Every other Workspace scope is
+# off by default — the digest workflow only reads mail, so Drive/Docs/
+# Sheets/Calendar access would be unused privilege. Set GW_MCP_SCOPES=full
+# to opt into the broader read/write set if a future workflow needs it.
+_READONLY_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+]
+
 _FULL_SCOPES = [
     "https://mail.google.com/",
     "https://www.googleapis.com/auth/calendar",
@@ -37,8 +48,16 @@ _FULL_SCOPES = [
     "https://www.googleapis.com/auth/meetings.space.readonly",
 ]
 
+
+def _default_scopes() -> list[str]:
+    mode = (os.environ.get("GW_MCP_SCOPES") or "readonly").strip().lower()
+    if mode == "full":
+        return _FULL_SCOPES
+    return _READONLY_SCOPES
+
+
 def _get_scopes() -> list[str]:
-    """Read scopes from existing token, or fall back to full scopes for new auth."""
+    """Read scopes from existing token, or fall back to configured defaults."""
     if TOKEN_FILE.exists():
         try:
             token_data = json.loads(TOKEN_FILE.read_text())
@@ -47,9 +66,25 @@ def _get_scopes() -> list[str]:
                 return saved_scopes
         except (json.JSONDecodeError, KeyError):
             pass
-    return _FULL_SCOPES
+    return _default_scopes()
 
 SCOPES = _get_scopes()
+
+
+def effective_scopes() -> set[str]:
+    """Return the set of OAuth scopes currently in effect for this process."""
+    return set(SCOPES)
+
+
+def _is_readonly_scope(scope: str) -> bool:
+    """A scope is read-only if it ends with '.readonly' or '.metadata'."""
+    return scope.endswith(".readonly") or scope.endswith(".metadata")
+
+
+def has_write_scopes() -> bool:
+    """True if any effective scope grants write access (i.e. isn't read-only)."""
+    return any(not _is_readonly_scope(s) for s in effective_scopes())
+
 
 # Service cache so we don't rebuild on every call
 _service_cache: dict = {}
